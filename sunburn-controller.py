@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 # Sunburn project - Main control software
 #
 # This project was HIP energy research for assessing if solar panel energy could be
@@ -45,8 +47,10 @@ CHANGE_DEADZONE = 1.5
 SHORT_AVG = 1
 LONG_AVG = 6
 
-# Interval limit for performing adjustments
+# Interval limit for performing adjustments. That is, how many rounds of measurements are done before PID adjustment.
+# This has an effect on PID/system responsiveness.
 ADJUST_INTERVAL = 1
+
 # Computer on and off round limits
 OFF_LIMIT = 2
 ON_LIMIT = 2
@@ -57,10 +61,10 @@ DT = 4
 
 
 
-def r_cpu_use():
-""" Calculates real CPU use. Basically measured CPU usage times the multiplier based on
-number of active cores.
-"""
+def real_cpu_use():
+  """ Calculates real CPU use. Basically measured CPU usage times the multiplier based on
+  number of active cores.
+  """
   return core_conversion_multipliers[processor_limits[1]] * cpu_use
 
 def readFloat():
@@ -87,7 +91,7 @@ def interface(mode, pid, processor_limits, manual_target):
       if key == "l":
         # Enable manual CPU limit mode
         mode = 1
-        pwr.powerOn()
+        pwr.power_on()
         state["powered"] = 1
       elif key == "p":
         # Enable manual power entry mode
@@ -160,6 +164,7 @@ def adjust(target, measured, integral, pid, previous_error):
   Arguments: target value, measured value, integral, pid values in array
   """
   
+  # Normal PID calculations
   error = target - measured
   new_integral = integral + error*DT
   # Limit the integral min and max 
@@ -171,9 +176,9 @@ def adjust(target, measured, integral, pid, previous_error):
   adjustment = pid[0] * error / 10 + pid[1] * integral / 10 + pid[2] * derivative / 10
   
   if DEBUG:
-    print("PID")
-    print("TGT: " + str(target) + " - CURRENT: " + str(measured))
-    print("Error: " + str(error) + " - Derivative: " + str(derivative) + " - Integral: " +  str(integral))
+    print("** PID values:")
+    print("** TGT: " + str(target) + " - CURRENT: " + str(measured))
+    print("** Error: " + str(error) + " - Derivative: " + str(derivative) + " - Integral: " +  str(integral))
     print(adjustment)
     print(adjustment)
   
@@ -189,14 +194,18 @@ def average(data):
 #************************************
     
 def main():    
-  """Main function."""
+  """Main function. Init system and start measurement/adjustment/control cycle
+Number of measurement rounds is defined by value of ADJUST_INTERVAL. Default
+value is 1, which translates to cycle of two measurements per adjustment.
+
+While running, the PID values can be adjusted via interface.
+  """
 
   #Initial intervals and power control
   adjust_interval = 0
   powered = 0
-  off_counter = 0
-  on_counter = 0
-
+  power_counter = 0
+  
   #Power budget value
   budget = 0
 
@@ -225,7 +234,7 @@ def main():
   # processor
   core_limits = [16, 31.0, 33.4, 47, 51.5]
   
-  # CPU use and used core number
+  # Processor limits = [cpu use limit in pct, number of active cores]
   processor_limits[7,0]
   
   #Power target value in manual mode
@@ -243,9 +252,7 @@ def main():
 
   print("System started with default values: Press enter for settings")
 
-  
-  def interface(mode, pid, processor_limits, manual_target):
-  
+    
   while(1):
     #Detect keypress, activate settings
     try:
@@ -257,7 +264,7 @@ def main():
 
 
     #Collect CPU data from client over network.
-    msg = udpcomms.waitmsg()
+    msg = udpcomms.wait_msg()
     if msg == None:
        cpu_use = 0
     else:
@@ -308,12 +315,9 @@ def main():
     
     
     # Adjustment routine
-    #  Adjust cores based on measured values.
-    #  This compares the known core power values against the measured values and adjusts the
-    #  number of cores as needed. This greatly enhances the adaptation speed to sudden
-    #  changes in power supply.
-    #  Basically this is a gearbox that attempts to reduce overhead and keep the processor power
-    #  consumption in check.
+    # This compares the known core power values against the measured values and adjusts the
+    # number of cores as needed. This greatly enhances the adaptation speed to sudden
+    # changes in power supply.
     
     # Approximate a new value of cpu limit from following formula: 
     # (Target - Core lower limit) / (Core upper limit - core lower limit) = cpu limit
@@ -340,38 +344,48 @@ def main():
               processor_limits[1] = CORES
            else:
               
-              a = core_limits[processor_limits[1]]
-              b = core_limits[processor_limits[1] - 1]
+              upper = core_limits[processor_limits[1]]
+              lower = core_limits[processor_limits[1] - 1]
 
-              processor_limits[0] = int(((power_target - b) / (a - b)) * 100)
+              processor_limits[0] = int(((power_target - lower) / (upper - lower)) * 100)
               
         # Change downward, reduce number of cores and increase cpu usage.
         elif processor_limits[1] > 1:
+        
           # Allow some leeway before changing number of cores. This prevents unnecessary jumps
           # if there operating power is near the limits of the power ratings of two cores.
           
           if power_target < (core_limits[processor_limits[1] - 1] - CHANGE_DEADZONE):
+            # Decrease number of cores, perform sanity checks
             processor_limits[1] -= 1
             if DEBUG:
-              print("Core down - core limit: " + str(processor_limits[1]))
+              print("** Core limited - core limit now at : " + str(processor_limits[1]))
             if processor_limits[1] < 1:
               processor_limits[1] = 1
-            else:
-             # Calculate value for cpu limit
-             if processor_limits[1] < 2:
-               a = core_limits[1]
-               b = core_limits[0]
-             elif processor_limits[1] < 3:
-               a = core_limits[2]
-               b = core_limits[0]
-             else:
-               a = core_limits[4]
-               b = core_limits[2]
-             processor_limits[0] = int(((power_target - b) / (a - b)) * 100)
-             if integral > 5:
-               integral -= 1
+            else: 
 
-        #Sanity checks, less than 7 % unachiavable due to CPUlimit limitations
+            # Calculate value for cpu limit based on number of active cores
+            # Caveat: When going down, the max power of cores 1 & 2 and 3 & 4 are
+            # within few watts due to HyperThreading. Thus the jump from comparing
+            # idle to comparing core 2.
+            
+              if processor_limits[1] < 2:
+                upper = core_limits[1]
+                lower = core_limits[0]                
+              elif processor_limits[1] < 3:
+                upper = core_limits[2]
+                lower = core_limits[0]
+              else:
+                upper = core_limits[3]
+                lower = core_limits[2]
+                
+              processor_limits[0] = int(((power_target - lower) / (upper - lower)) * 100)
+              
+              # If the current integral is aggressive, reduce it slightly to make life of PID easier.
+              if integral > 5:
+                integral -= 1
+
+        #Sanity checks, cpu limit of less than 7 % unachiavable due to CPUlimit limitations on clientside.
         if processor_limits[0] > 100:
            processor_limits[0] = 100
         elif processor_limits[0] < 7:
@@ -380,38 +394,48 @@ def main():
 
     # Computer state control, used if the system is not in manual limit mode.
     if mode != 1:
-      #Shutdown-Powerup check
+      # Shutdown-Powerup check
+      # Compare current power to minimum power and increment/decrement counter.
+      # If counter exceeds limits, shutdown/startup client.
+      
       if power_target < MIN_POWER and powered:
-        off_counter += 1
+        power_counter -= 1
       else:
-        off_counter = 0
+        power_counter = 0
       if power_target > MIN_POWER and not powered:
-        on_counter += 1
+        power_counter += 1
       else:
-        on_counter = 0
+        power_counter = 0
     
-      if on_counter > ON_LIMIT:
-        pwr.powerOn()
+      if power_counter > ON_LIMIT:
+        pwr.power_on()
         processor_limits[1] = 1
         powered = 1
-      elif off_counter > OFF_LIMIT:
-        pwr.powerOff()
+        
+      elif power_counter < OFF_LIMIT:
+        pwr.power_off()
         processor_limits[1] = 0
-        udpcomms.sendmsg("shutdown:")
+        udpcomms.send_msg("shutdown:")
         powered = 0
         
-    # Change adjust interval
+    # Change adjust interval while keeping it reasonable when adjustment routine is not done.
     if adjust_interval > ADJUST_INTERVAL:
       adjust_interval = 0
     adjust_interval += 1  
     
-    #Issue commands
+    #Issue commands to client
     if powered:
-      udpcomms.sendmsg("control:" + str(int(processor_limits[1])) + ":" + str(int(processor_limits[0])))
-      #Poll computer
-      udpcomms.sendmsg("status:")
+      udpcomms.send_msg("control:" + str(int(processor_limits[1])) + ":" + str(int(processor_limits[0])))
+      #Poll computer for status
+      udpcomms.send_msg("status:")
     
     # Rough estimate of system accuracy in long run. 
     budget += power_target - power
     if DEBUG:
       print("\n\n Current Power Budget: " + str(budget) + "\n")    
+
+      
+if __name__ == "__main__":
+  main()
+  
+  
