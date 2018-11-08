@@ -58,7 +58,10 @@ ON_LIMIT = 2
 # PID derivative time
 DT = 4
 
-
+# Modes
+MODE_AUTO = 0
+MODE_LIMIT_TEST = 1
+MODE_PWR_TEST = 2
 
 
 def real_cpu_use():
@@ -80,23 +83,23 @@ def readFloat():
        return None
 
 def interface(mode, pid, processor_limits, manual_target):
-    """Rudimentary user interface for adjusting the system settings. Takes state as argument, returns state"""
+    """Rudimentary user interface for adjusting the system settings. Arguments: interface(mode, pid, processor_limits, manual_target) returns updated values for these."""
   
   print("Input command: (M)ode select/adjust - (P)ID adjust - Empty input cancels")
   key = input().lower()
   if key == "m":
     if not mode:
-      print("Enter which mode? Manual (p)ower entry or manual (l)imit entry?")
+      print("Enter which mode? Manual (p)ower level, manual CPU (l)imit or (a)utomatic mode (default)?")
       key = input().lower()
       if key == "l":
         # Enable manual CPU limit mode
-        mode = 1
-        pwr.power_on()
-        state["powered"] = 1
+        mode = MODE_LIMIT_TEST
       elif key == "p":
         # Enable manual power entry mode
-        mode = 2
-      state["mode"] = mode
+        mode = MODE_PWR_TEST
+      elif key == "a":
+        # Automatic mode
+        mode = MODE_AUTO
   # PID value adjustment
   elif key == "p":
     val = None      
@@ -124,9 +127,9 @@ def interface(mode, pid, processor_limits, manual_target):
   #    Replaces the solar system power value with given one
 
   # Assess entered mode and collect related data from user.
-  if mode == 1:
+  if mode == MODE_LIMIT_TEST:
     print("Input new limit values.")
-    i = None      
+    i = None
     while(i == None):
       print("Enter CPU limit (" + str(processor_limits[0]) + ")")
       i = readFloat()
@@ -135,7 +138,7 @@ def interface(mode, pid, processor_limits, manual_target):
     elif i < 7:
       i = 7
      processor_limits[0] = i
-     i = None      
+     i = None
     while(i == None):
       print("Enter core limit (" + str(processor_limits[1]) + ")")
       i = readFloat()
@@ -146,15 +149,15 @@ def interface(mode, pid, processor_limits, manual_target):
     processor_limits[1] = int(i)
     print("New values (CPU, cores): " + str(processor_limits[0])+ ", " + str(processor_limits[1]))
     
-  elif mode == 2:
+  elif mode == MODE_PWR_TEST:
     print("Input new power.")
-    i = None      
+    i = None
     while(i == None):
       print("Enter new power target (" + str(manual_target) + ")")
       i = readFloat()
     if i < 1:
       i = 0
-      
+    
     
   # Return changed state
   return mode, pid, processor_limits, manual_target
@@ -206,6 +209,12 @@ While running, the PID values can be adjusted via interface.
   powered = 0
   power_counter = 0
   
+  # Mode of the system
+  # Mode 0: Automatic (Default)
+  # Mode 1: Test mode 1 - Manually set CPU/Core limits
+  # Mode 2: Test mode 2 - Manually set power level target
+  mode = MODE_AUTO
+
   #Power budget value
   budget = 0
 
@@ -239,6 +248,8 @@ While running, the PID values can be adjusted via interface.
   
   #Power target value in manual mode
   manual_power_target = 0
+
+
 
 
   
@@ -294,7 +305,7 @@ While running, the PID values can be adjusted via interface.
     # one measurement, thus the naming.
     
     #Log power from supply if system is not in manual control mode 2. Otherwise use the manually set power target
-    if mode != 2:
+    if mode < MODE_PWR_TEST:
       supply_power.append(measurement.supply_power)
       supply_power_avg.append(measurement.supply_power)
     else:
@@ -303,10 +314,10 @@ While running, the PID values can be adjusted via interface.
     
     # Drop oldest values if the averaging window is full.
     if len(supply_power) > SHORT_AVG:
-      supply_power.pop(0)  
+      supply_power.pop(0)
       usage_power.pop(0)
     if len(supply_power_avg) > LONG_AVG:
-      supply_power_avg.pop(0)  
+      supply_power_avg.pop(0)
       usage_power_avg.pop(0)
     
     #Averages used in adjustment
@@ -327,7 +338,7 @@ While running, the PID values can be adjusted via interface.
     # This is by no means accurate, but sets the cpu use limit closer to target, allowing
     # the PID to get back into play faster
     
-    if mode != 1 and powered:
+    if mode != MODE_LIMIT_TEST and powered:
 
     # If adjustment interval is reached, adjust.
       if adjust_interval > ADJUST_INTERVAL:
@@ -393,7 +404,8 @@ While running, the PID values can be adjusted via interface.
 
 
     # Computer state control, used if the system is not in manual limit mode.
-    if mode != 1:
+    # This also ensures that the computer is turned on in mode 1.
+    if mode != MODE_LIMIT_TEST:
       # Shutdown-Powerup check
       # Compare current power to minimum power and increment/decrement counter.
       # If counter exceeds limits, shutdown/startup client.
@@ -417,15 +429,18 @@ While running, the PID values can be adjusted via interface.
         processor_limits[1] = 0
         udpcomms.send_msg("shutdown:")
         powered = 0
-        
-    # Change adjust interval while keeping it reasonable when adjustment routine is not done.
+    elif mode == MODE_LIMIT_TEST and not powered:
+	pwr.power_on()
+	powered = 1
+
+    # Change adjust interval and ensure that the value stays sane when no adjustment is done to the system.
     if adjust_interval > ADJUST_INTERVAL:
       adjust_interval = 0
     adjust_interval += 1  
     
     #Issue commands to client
     if powered:
-      udpcomms.send_msg("control:" + str(int(processor_limits[1])) + ":" + str(int(processor_limits[0])))
+      udpcomms.send_msg("control:" + str(processor_limits[1]) + ":" + str(processor_limits[0]))
       #Poll computer for status
       udpcomms.send_msg("status:")
     
